@@ -20,12 +20,14 @@ const ISSUE_COMMENTS_PER_PAGE = 100;
 const ISSUE_COMMENT_REACTIONS_PER_PAGE = 100;
 const ISSUE_EVENTS_PER_PAGE = 100;
 const TEAMS_PER_PAGE = 100;
-const NOTIFICATIONS_PER_PAGE = 50;
 const PULL_COMMENTS_PER_PAGE = 100;
 const PULL_COMMENT_REACTIONS_PER_PAGE = 100;
 const PULLS_PER_PAGE = 100;
 const REVIEWS_PER_PAGE = 100;
 const REVIEW_COMMENTS_PER_PAGE = 100;
+
+const GRAPHQL_RETRY_DELAY = 1000; // Base delay in ms
+const MAX_GRAPHQL_RETRIES = 3;
 
 type PullsGetUserResponseType = GetResponseTypeFromEndpointMethod<
   typeof octokit.users.getAuthenticated
@@ -53,12 +55,6 @@ type IssuesListEventsResponseType = GetResponseTypeFromEndpointMethod<
 >;
 type IssuesListEventsResponseDataType = GetResponseDataTypeFromEndpointMethod<
   typeof octokit.issues.listEvents
->;
-type ListNotificationsResponseType = GetResponseTypeFromEndpointMethod<
-  typeof octokit.activity.listNotificationsForAuthenticatedUser
->;
-type ListNotificationsResponseDataType = GetResponseDataTypeFromEndpointMethod<
-  typeof octokit.activity.listNotificationsForAuthenticatedUser
 >;
 type PullsListCommentsResponseType = GetResponseTypeFromEndpointMethod<
   typeof octokit.pulls.listReviewComments
@@ -93,6 +89,86 @@ type IssuesListReactionsResponseDataType =
     typeof octokit.reactions.listForIssueComment
   >;
 
+// Update RepoActivityEvent type to include all needed fields
+type RepoActivityEvent = {
+  type: "PullRequestEvent";
+  subject: {
+    type: string;
+    title: string;
+    url: string;
+  };
+  repository: {
+    owner: {
+      login: string;
+    };
+    name: string;
+  };
+  payload: {
+    pull_request: {
+      number: number;
+      title: string;
+      html_url: string;
+      user: {
+        login: string;
+      };
+      body: string;
+      draft: boolean;
+      requested_reviewers: Array<{
+        login: string;
+        id: number;
+      }>;
+      requested_teams: Array<{
+        name: string;
+        id: number;
+      }>;
+    };
+  };
+  created_at: string;
+};
+
+// Update GraphQL response type to match
+type RepoActivityResponse = {
+  repository: {
+    pullRequests: {
+      nodes: Array<{
+        number: number;
+        title: string;
+        url: string;
+        author: {
+          login: string;
+        };
+        body: string;
+        isDraft: boolean;
+        repository: {
+          owner: {
+            login: string;
+          };
+          name: string;
+        };
+        reviewRequests: {
+          nodes: Array<{
+            requestedReviewer: {
+              __typename: string;
+              login?: string;
+              name?: string;
+              id: string;
+            };
+          }>;
+        };
+        comments: {
+          nodes: Array<{
+            body: string;
+            author: {
+              login: string;
+            };
+            createdAt: string;
+          }>;
+        };
+      }>;
+    };
+  };
+};
+
 export let gitHubCallsCounter = 0;
 
 export function resetGitHubCallsCounter() {
@@ -104,7 +180,7 @@ export function resetGitHubCallsCounter() {
  */
 export async function syncGitHubRepo(
   repoStateBuilder: RepoState,
-  recentNotifications: ListNotificationsResponseDataType[0][],
+  recentActivities: RepoActivityEvent[], // Changed from recentNotifications
   myGitHubUser: GitHubUser,
   settings: Settings,
 ) {
@@ -136,7 +212,7 @@ export async function syncGitHubRepo(
     // Sync comments:
 
     repoSyncResult.comments = await syncComments(
-      recentNotifications,
+      recentActivities,
       myGitHubUser,
       settings,
     );
@@ -355,12 +431,12 @@ async function syncMyPR(pr: PullsListResponseDataType[0], repo: RepoState) {
 }
 
 async function syncComments(
-  recentNotifications: ListNotificationsResponseDataType[0][],
+  recentActivities: RepoActivityEvent[], // Changed from recentNotifications
   myGitHubUser: GitHubUser,
   settings: Settings,
 ) {
   const commentsBuilder = [] as Comment[];
-  for (const notification of recentNotifications) {
+  for (const notification of recentActivities) {
     if (notification.subject.type !== "PullRequest") {
       continue;
     }
@@ -381,7 +457,7 @@ async function syncComments(
 }
 
 async function syncPullComments(
-  notification: ListNotificationsResponseDataType[0],
+  notification: RepoActivityEvent,
   myGitHubUser: GitHubUser,
   settings: Settings,
   commentsBuilder: Comment[],
@@ -451,7 +527,7 @@ async function syncPullComments(
 }
 
 async function syncIssueComments(
-  notification: ListNotificationsResponseDataType[0],
+  notification: RepoActivityEvent,
   myGitHubUser: GitHubUser,
   settings: Settings,
   commentsBuilder: Comment[],
@@ -726,63 +802,163 @@ async function listIssueEventsPage(
   }
 }
 
-export async function listRecentNotifications(
+export async function listRepoActivity(
+  repoOwner: string,
+  repoName: string,
   since: Date,
-): Promise<ListNotificationsResponseDataType[0][]> {
-  const result = [];
-  let pageNumber = 1;
-  let response: ListNotificationsResponseType;
-  do {
-    response = await listRecentNotificationsPage(since, pageNumber);
-    for (const arrayElement of response.data) {
-      if (
-        arrayElement.reason === "author" ||
-        arrayElement.reason === "review_requested" ||
-        arrayElement.reason === "mention"
-      ) {
-        result.push(arrayElement as ListNotificationsResponseDataType[0]);
-      }
-    }
-    pageNumber++;
-  } while (response.data.length >= NOTIFICATIONS_PER_PAGE);
-  return result;
-}
+  myGitHubUser: GitHubUser,
+): Promise<RepoActivityEvent[]> {
+  // Changed from ListRepoEventsResponseDataType[0][]
+  let retries = 0;
 
-async function listRecentNotificationsPage(
-  since: Date,
-  pageNumber: number,
-  retryNumber = 0,
-): Promise<ListNotificationsResponseType> {
-  try {
-    if (retryNumber > 0) {
-      // exponential backoff:
-      await delay(1000 * Math.pow(2, retryNumber - 1));
-    }
-    await throttleGitHub();
-    return await octokit.activity.listNotificationsForAuthenticatedUser({
-      all: true,
-      participating: true,
-      since: since.toISOString(),
-      per_page: NOTIFICATIONS_PER_PAGE,
-      page: pageNumber,
-      headers: {
-        "X-GitHub-Api-Version": "2022-11-28",
-        // no caching:
-        "If-None-Match": "",
-      },
-    });
-  } catch (e) {
-    if (retryNumber > MAX_NUMBER_OF_RETRIES) {
-      console.error("The maximum number of retries reached");
-      throw e;
-    } else {
-      return await listRecentNotificationsPage(
-        since,
-        pageNumber,
-        retryNumber + 1,
-      );
+  while (retries <= MAX_GRAPHQL_RETRIES) {
+    try {
+      await throttleGitHub();
+
+      const query = `
+        query($owner: String!, $name: String!) {
+          repository(owner: $owner, name: $name) {
+            pullRequests(first: 100, orderBy: {field: UPDATED_AT, direction: DESC}) {
+              nodes {
+                number
+                title
+                url
+                author {
+                  login
+                }
+                body
+                isDraft
+                repository {
+                  owner {
+                    login
+                  }
+                  name
+                }
+                reviewRequests(first: 100) {
+                  nodes {
+                    requestedReviewer {
+                      __typename
+                      ... on User {
+                        login
+                        id
+                      }
+                      ... on Team {
+                        name
+                        id
+                      }
+                    }
+                  }
+                }
+                comments(first: 100) {
+                  nodes {
+                    body
+                    author {
+                      login
+                    }
+                    createdAt
+                  }
+                }
+              }
+            }
+          }
+        }
+      `;
+
+      const response = await octokit.graphql<RepoActivityResponse>(query, {
+        owner: repoOwner,
+        name: repoName,
+      });
+
+      // Filter comments by date in the filter function
+      return response.repository.pullRequests.nodes
+        .filter(
+          (pr) =>
+            pr.author.login === myGitHubUser.login ||
+            pr.body.includes(`@${myGitHubUser.login}`) ||
+            pr.comments.nodes.some(
+              (comment) =>
+                new Date(comment.createdAt) >= since && // Add date filter here
+                comment.body.includes(`@${myGitHubUser.login}`),
+            ) ||
+            pr.reviewRequests.nodes.some((request) => {
+              const reviewer = request.requestedReviewer;
+              return (
+                (reviewer.__typename === "User" &&
+                  reviewer.login === myGitHubUser.login) ||
+                (reviewer.__typename === "Team" &&
+                  myGitHubUser.teamIds.includes(parseInt(reviewer.id)))
+              );
+            }),
+        )
+        .map((pr) => ({
+          type: "PullRequestEvent",
+          subject: {
+            type: "PullRequest",
+            title: pr.title,
+            url: pr.url,
+          },
+          repository: {
+            owner: {
+              login: pr.repository?.owner?.login || repoOwner,
+            },
+            name: pr.repository?.name || repoName,
+          },
+          payload: {
+            pull_request: {
+              number: pr.number,
+              title: pr.title,
+              html_url: pr.url,
+              user: {
+                login: pr.author.login,
+              },
+              body: pr.body,
+              draft: pr.isDraft,
+              requested_reviewers: pr.reviewRequests.nodes
+                .filter(
+                  (request) => request.requestedReviewer.__typename === "User",
+                )
+                .map((request) => ({
+                  login: request.requestedReviewer.login,
+                  id: parseInt(request.requestedReviewer.id),
+                })),
+              requested_teams: pr.reviewRequests.nodes
+                .filter(
+                  (request) => request.requestedReviewer.__typename === "Team",
+                )
+                .map((request) => ({
+                  name: request.requestedReviewer.name,
+                  id: parseInt(request.requestedReviewer.id),
+                })),
+            },
+          },
+          created_at: new Date().toISOString(),
+        })) as RepoActivityEvent[]; // Updated cast
+    } catch (error) {
+      retries++;
+
+      // Check if it's a rate limit error
+      if (
+        error.message.includes("rate limit") ||
+        error.message.includes("secondary rate limit")
+      ) {
+        console.warn(
+          `GitHub API rate limited, attempt ${retries} of ${MAX_GRAPHQL_RETRIES}`,
+        );
+
+        if (retries <= MAX_GRAPHQL_RETRIES) {
+          // Exponential backoff
+          const delay = GRAPHQL_RETRY_DELAY * Math.pow(2, retries - 1);
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          continue;
+        }
+      }
+
+      // If we've hit max retries or it's not a rate limit error, throw
+      throw error;
     }
   }
+
+  return []; // Return empty array if all retries failed
 }
 
 /** In each thread comments are ordered by their created_at date. */

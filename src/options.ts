@@ -16,6 +16,10 @@ import {
   storeSettings,
 } from "./storage";
 import { trySync } from "./sync";
+import { initiateGitHubAuth } from "./auth";
+import { Octokit } from "@octokit/rest";
+import { GitHubUser } from "./gitHubUser";
+import { trySyncWithCredentials } from "./sync";
 
 const form = document.getElementById("repoForm");
 const repoListDiv = document.getElementById("repoList");
@@ -239,13 +243,49 @@ document
       .then(() => storeMyPrBlockList([]))
       .then(() => storeCommentBlockList([]))
       .then(() => {
-        chrome.action.setIcon({
-          path: "icons/grey128.png",
+        // Clear extension storage
+        chrome.storage.sync.clear();
+
+        // Clear identity cache
+        chrome.identity.clearAllCachedAuthTokens(() => {
+          console.log("Cleared auth tokens");
+
+          // Set icon to grey to indicate logged out state
+          chrome.action.setIcon({
+            path: "icons/grey128.png",
+          });
+
+          // Reload the page
+          window.location.reload();
         });
       })
       .then(
         () =>
           (document.getElementById("main").innerHTML =
-            "<h1>Click on the extension icon in the toolbar to add a new token.</h1>"),
+            "<h1>Click on the extension icon in the toolbar to log in to.</h1>"),
       );
+  });
+
+// Update the login button code to use the proper auth flow
+document
+  .getElementById("loginButton")
+  .addEventListener("click", async function () {
+    try {
+      const auth = await initiateGitHubAuth();
+      const octokit = new Octokit({ auth: auth.token });
+      const user = await octokit.users.getAuthenticated();
+
+      const gitHubUser = new GitHubUser(user.data.id);
+      await trySyncWithCredentials(gitHubUser);
+
+      // Success - refresh the page
+      window.location.reload();
+    } catch (error) {
+      console.error("Authentication failed:", error);
+      const errorDiv = document.getElementById("login-error");
+      if (errorDiv) {
+        errorDiv.style.display = "block";
+        errorDiv.textContent = `Authentication failed: ${error.message}. Check console for details.`;
+      }
+    }
   });

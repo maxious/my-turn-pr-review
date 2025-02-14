@@ -117,3 +117,12 @@ Read more about service workers [here](https://developer.chrome.com/docs/extensi
 - [webpack documentation](https://webpack.js.org/concepts/)
 - [The TypeScript Handbook](https://www.typescriptlang.org/docs/handbook/intro.html)
 - [Sass Basics](https://sass-lang.com/guide)
+
+### OAuth Setup for Development
+
+To be able to test the OAuth login locally you'll need the extension's redirect URL by running in Chrome console:
+```javascript
+chrome.identity.getRedirectURL()
+// Will return something like: https://<extension-id>.chromiumapp.org/
+```
+Add this URL to your GitHub OAuth app's "Authorization callback URL" settings

@@ -6,7 +6,15 @@
   "background": {
     "service_worker": "serviceWorker.js"
   },
-  "permissions": ["alarms","storage"],
+  "permissions": [
+    "alarms",
+    "storage",
+    "identity"
+  ],
+  "host_permissions": [
+    "https://github.com/*",
+    "https://api.github.com/*"
+  ],
   "options_ui": {
     "page": "options.html",
     "open_in_tab": true
@@ -25,4 +33,4 @@
     "48": "/icons/red48.png",
     "128": "/icons/red128.png"
   }
-}
+} 

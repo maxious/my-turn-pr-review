@@ -21,11 +21,11 @@ import {
   getReposState,
   getReviewRequestBlockList,
   getSettings,
-  storeGitHubUser,
   storeHideLeaveExtensionReviewDiv,
   storeSettings,
 } from "./storage";
 import { trySyncWithCredentials } from "./sync";
+import { getStoredToken, initiateGitHubAuth } from "./auth";
 
 document.getElementById("go-to-options").addEventListener("click", () => {
   chrome.runtime.openOptionsPage();
@@ -44,45 +44,33 @@ document
   .getElementById("showBlocked")
   .addEventListener("click", () => updatePopupPage());
 
-document.getElementById("tokenForm").addEventListener("submit", (e) => {
-  e.preventDefault();
-  const newToken = (
-    document.getElementById("newToken") as HTMLInputElement
-  ).value.trim();
-  new Octokit({
-    auth: newToken,
-  })
-    .request("GET /user", {
-      headers: {
-        "X-GitHub-Api-Version": "2022-11-28",
-      },
-    })
-    .then((v) => {
-      const userId = v.data.id;
-      console.log("GitHub user ID: " + userId);
-      const gitHubUser = new GitHubUser(userId, newToken);
-      const result = storeGitHubUser(gitHubUser);
-      // trigger sync:
-      trySyncWithCredentials(gitHubUser);
-      return result;
-    })
-    .then(() => {
-      chrome.tabs.create({ active: true, url: "/options.html" });
-      window.close();
-    })
-    .catch((e) => {
-      showError(e);
-    });
+document.getElementById("login-button").addEventListener("click", async () => {
+  try {
+    const auth = await initiateGitHubAuth();
+    const octokit = new Octokit({ auth: auth.token });
+    const user = await octokit.users.getAuthenticated();
+    const gitHubUser = new GitHubUser(user.data.id);
+    await trySyncWithCredentials(gitHubUser);
+    window.location.reload();
+  } catch (error) {
+    console.error("Authentication failed:", error);
+    const errorDiv = document.getElementById("login-error");
+    if (errorDiv) {
+      errorDiv.style.display = "block";
+      errorDiv.textContent = `Authentication failed: ${error.message}. Check console for details.`;
+    }
+  }
 });
 
 class NoGitHubToken extends Error {}
 
 getGitHubUser()
-  .then((gitHubUser) => {
-    if (gitHubUser && gitHubUser.token) {
+  .then(async (gitHubUser) => {
+    const token = await getStoredToken();
+    if (gitHubUser && token) {
       try {
         return new Octokit({
-          auth: gitHubUser.token,
+          auth: token,
         }).request("GET /user", {
           headers: {
             "X-GitHub-Api-Version": "2022-11-28",
@@ -143,25 +131,24 @@ async function maybeShowLeaveExtensionReview() {
 
 const BAD_CREDENTIALS_GITHUB_ERROR_MSG = "Bad credentials";
 
-function showError(e: Error) {
-  document.getElementById("auth").style.display = "block";
-  if (e instanceof NoGitHubToken) {
-    // That's a part of the init flow, not an error.
-    document.getElementById("setup").style.display = "block";
+function showError(error: Error) {
+  document.getElementById("main").style.display = "none";
+  document.getElementById("login-section").style.display = "block";
+  const errorDiv = document.getElementById("login-error");
+  errorDiv.style.display = "block";
+
+  // Make error messages more user-friendly
+  if (error.message.includes("Bad credentials")) {
+    errorDiv.textContent =
+      "Looks like your GitHub session expired! Mind logging in again?";
+  } else if (error.message.includes("API rate limit exceeded")) {
+    errorDiv.textContent =
+      "Whoa there! We hit GitHub's speed limit. Give it a few minutes and try again!";
+  } else if (error.message.includes("myGitHubUser is not defined")) {
+    errorDiv.textContent =
+      "Hey! Looks like you need to log in to GitHub first. Click the login button below!";
   } else {
-    const errorDiv = document.getElementById("error");
-    errorDiv.style.display = "block";
-    if (e.message === BAD_CREDENTIALS_GITHUB_ERROR_MSG) {
-      errorDiv.innerHTML =
-        "Error: Bad GitHub credentials. Likely the GitHub access token expired and needs to be updated. Follow the instructions below.<br/><br/>";
-    } else if (e.message.includes("API rate limit exceeded")) {
-      errorDiv.innerHTML =
-        "Oops, we got throttled by GitHub... Sync will be retried later.<br/><br/>";
-    } else {
-      errorDiv.innerHTML =
-        "Something went wrong. If the error persists it may be a problem with the provided GitHub auth token.<br/><br/>" +
-        e;
-    }
+    errorDiv.textContent = "Oops! Something went wrong. Try logging in again!";
   }
 }
 
@@ -321,16 +308,7 @@ async function populateFromState(
         syncFailureRepos
           .map((repo) => {
             const lastSyncErrorMsg = repo.lastSyncResult.errorMsg;
-            let message = repo.fullName + " - " + lastSyncErrorMsg;
-            if (
-              lastSyncErrorMsg.includes(
-                "You must grant your Personal Access token access to this organization",
-              )
-            ) {
-              message +=
-                ' <a href="https://github.com/settings/tokens" target="_blank">Configure SSO (authorize the access token)</a>.<br/> If that\'s already done just wait for a next sync with GitHub to complete - these are the errors messages for the last sync (see timestamp below).<br/>' +
-                '<img src="configure-sso-instructions-later.png" style="border: 1px solid #555; width: 600px;" alt="Grant access to all the necessary organizations">';
-            }
+            const message = repo.fullName + " - " + lastSyncErrorMsg;
             return message;
           })
           .join(",<br/>");
@@ -771,3 +749,61 @@ function deleteAllRows(htmlTableElement: HTMLTableElement) {
     htmlTableElement.deleteRow(1);
   }
 }
+
+async function checkAuthAndInitialize() {
+  try {
+    const token = await getStoredToken();
+    if (!token) {
+      showLoginSection();
+      return;
+    }
+
+    // Test if token is valid
+    const octokit = new Octokit({ auth: token });
+    const user = await octokit.users.getAuthenticated();
+
+    // Token is valid, hide login and show content
+    document.getElementById("login-section").style.display = "none";
+    document.getElementById("main").style.display = "block";
+
+    const gitHubUser = new GitHubUser(user.data.id);
+    await trySyncWithCredentials(gitHubUser);
+
+    // Initialize app state
+    await updatePopupPage();
+
+    // Start periodic updates
+    setInterval(updatePopupPage, 60000);
+  } catch (error) {
+    console.error("Authentication error:", error);
+    showLoginSection(error.message);
+  }
+}
+
+function showLoginSection(errorMessage?: string) {
+  document.getElementById("main").style.display = "none";
+  document.getElementById("login-section").style.display = "block";
+
+  if (errorMessage) {
+    const errorDiv = document.getElementById("login-error");
+    errorDiv.style.display = "block";
+    if (errorMessage.includes("Bad credentials")) {
+      errorDiv.textContent = "Session expired. Please log in again.";
+    } else {
+      errorDiv.textContent = `Error: ${errorMessage}. Please try again.`;
+    }
+  }
+}
+
+// Handle device code display
+chrome.runtime.onMessage.addListener((message) => {
+  if (message.type === "SHOW_USER_CODE") {
+    const codeElement = document.getElementById("device-code");
+    if (codeElement) {
+      codeElement.textContent = `Enter this code: ${message.code}`;
+    }
+  }
+});
+
+// Initialize popup when opened
+checkAuthAndInitialize();
