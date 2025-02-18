@@ -26,7 +26,6 @@ import {
   storeReviewRequestBlockList,
   storeRepoStateMap,
 } from "./storage";
-import { ListRepoEventsResponseDataType } from "./github";
 
 export let octokit: Octokit;
 
@@ -75,9 +74,6 @@ export async function trySyncWithCredentials(gitHubUser: GitHubUser) {
  * Note: no concurrent calls!
  */
 export async function sync(myGitHubUser: GitHubUser) {
-  // Get existing data first
-  const existingRepoStateByFullName = await getRepoStateByFullName();
-
   const prBlocksAtSyncStart = await getMyPrBlockList();
   const reviewRequestBlocksAtSyncStart = await getReviewRequestBlockList();
   const commentBlocksAtSyncStart = await getCommentBlockList();
@@ -85,43 +81,35 @@ export async function sync(myGitHubUser: GitHubUser) {
   resetGitHubCallsCounter();
   const syncStartUnixMillis = Date.now();
   const settings = await getSettings();
+  const allReposIncludingDisabled = await getRepos();
+  const repos = allReposIncludingDisabled.filter((v) => v.monitoringEnabled);
+  const prevRepoStateByFullName = await getRepoStateByFullName();
+  const repoStateByFullNameBuilder = new Map<string, RepoState>();
 
   const user = (await getUser()).data;
   myGitHubUser.login = user.login;
   const userTeams = await listUserTeams();
   myGitHubUser.teamIds = userTeams.map((v) => v.id);
 
-  const allReposIncludingDisabled = await getRepos();
-  const repos = allReposIncludingDisabled.filter((v) => v.monitoringEnabled);
-  const repoStateByFullNameBuilder = new Map<string, RepoState>(
-    existingRepoStateByFullName,
-  ); // Preserve existing data!
-
-  // used purely as a starting point (#NOT_MATURE: what if user unsubscribed from them?):
-  const repoActivities = new Map<string, ListRepoEventsResponseDataType[0][]>();
-
+  // It's probably better to do these GitHub requests in a sequential manner so that GitHub is not
+  // tempted to block them even if user monitors many repos:
   for (const repo of repos) {
+    let repoStateBuilder = prevRepoStateByFullName.get(repo.fullName());
+    if (!repoStateBuilder) {
+      repoStateBuilder = new RepoState(repo.fullName());
+    }
+    repoStateByFullNameBuilder.set(repo.fullName(), repoStateBuilder);
+
     const activities = await listRepoActivity(
       repo.owner,
       repo.name,
       settings.getMinCommentCreateDate(),
       myGitHubUser,
     );
-    repoActivities.set(repo.fullName(), activities);
-  }
-
-  // It's probably better to do these GitHub requests in a sequential manner so that GitHub is not
-  // tempted to block them even if user monitors many repos:
-  for (const repo of repos) {
-    let repoStateBuilder = repoStateByFullNameBuilder.get(repo.fullName());
-    if (!repoStateBuilder) {
-      repoStateBuilder = new RepoState(repo.fullName());
-    }
-    repoStateByFullNameBuilder.set(repo.fullName(), repoStateBuilder);
 
     await syncGitHubRepo(
       repoStateBuilder,
-      repoActivities.get(repo.fullName()) || [],
+      activities || [],
       myGitHubUser,
       settings,
     );
