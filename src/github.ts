@@ -1235,6 +1235,16 @@ async function listIssueCommentReactionsPage(
   }
 }
 
+export async function getGitHubUser(): Promise<GitHubUser> {
+  const user = (await getUser()).data;
+  const userTeams = await listUserTeams();
+  return new GitHubUser(
+    user.id,
+    user.login,
+    userTeams.map((v) => v.id),
+  );
+}
+
 export async function getUser(
   retryNumber = 0,
 ): Promise<PullsGetUserResponseType> {

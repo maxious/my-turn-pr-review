@@ -1,12 +1,10 @@
 import { Octokit } from "@octokit/rest";
-import { GitHubUser } from "./gitHubUser";
 import {
-  getUser,
   gitHubCallsCounter,
-  listUserTeams,
   resetGitHubCallsCounter,
   syncGitHubRepo,
   listRepoActivity,
+  getGitHubUser,
 } from "./github";
 import { CommentBlock, MyPrBlock, ReviewRequestBlock } from "./block";
 import { Repo } from "./repo";
@@ -33,9 +31,10 @@ export async function trySync() {
   try {
     const token = await getStoredToken();
     if (!token) {
-      throw new Error("No valid authentication token");
+      console.error("No valid authentication token. Sync failed");
+      return;
     }
-    return trySyncWithCredentials(new GitHubUser(null)); // We'll get the ID in the sync process
+    return trySyncWithCredentials();
   } catch (e) {
     console.error("Sync failed", e);
   }
@@ -43,7 +42,7 @@ export async function trySync() {
 
 let syncInProgress = false;
 
-export async function trySyncWithCredentials(gitHubUser: GitHubUser) {
+export async function trySyncWithCredentials() {
   const token = await getStoredToken();
   if (!token) {
     // set icon to grey to indicate that the token is not valid
@@ -64,7 +63,7 @@ export async function trySyncWithCredentials(gitHubUser: GitHubUser) {
   console.info("Starting sync...");
   syncInProgress = true;
   try {
-    await sync(gitHubUser);
+    await sync();
   } finally {
     syncInProgress = false;
   }
@@ -73,7 +72,7 @@ export async function trySyncWithCredentials(gitHubUser: GitHubUser) {
 /**
  * Note: no concurrent calls!
  */
-export async function sync(myGitHubUser: GitHubUser) {
+export async function sync() {
   const prBlocksAtSyncStart = await getMyPrBlockList();
   const reviewRequestBlocksAtSyncStart = await getReviewRequestBlockList();
   const commentBlocksAtSyncStart = await getCommentBlockList();
@@ -86,10 +85,7 @@ export async function sync(myGitHubUser: GitHubUser) {
   const prevRepoStateByFullName = await getRepoStateByFullName();
   const repoStateByFullNameBuilder = new Map<string, RepoState>();
 
-  const user = (await getUser()).data;
-  myGitHubUser.login = user.login;
-  const userTeams = await listUserTeams();
-  myGitHubUser.teamIds = userTeams.map((v) => v.id);
+  const myGitHubUser = await getGitHubUser();
 
   // It's probably better to do these GitHub requests in a sequential manner so that GitHub is not
   // tempted to block them even if user monitors many repos:

@@ -17,8 +17,6 @@ import {
 } from "./storage";
 import { trySync } from "./sync";
 import { initiateGitHubAuth } from "./auth";
-import { Octokit } from "@octokit/rest";
-import { GitHubUser } from "./gitHubUser";
 import { trySyncWithCredentials } from "./sync";
 
 const form = document.getElementById("repoForm");
@@ -271,12 +269,8 @@ document
   .getElementById("loginButton")
   .addEventListener("click", async function () {
     try {
-      const auth = await initiateGitHubAuth();
-      const octokit = new Octokit({ auth: auth.token });
-      const user = await octokit.users.getAuthenticated();
-
-      const gitHubUser = new GitHubUser(user.data.id);
-      await trySyncWithCredentials(gitHubUser);
+      await initiateGitHubAuth();
+      await trySyncWithCredentials();
 
       // Success - refresh the page
       window.location.reload();

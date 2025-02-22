@@ -1,7 +1,6 @@
 import "../styles/popup.scss";
 import { Octokit } from "@octokit/rest";
 import { CommentBlock, MyPrBlock, ReviewRequestBlock } from "./block";
-import { GitHubUser } from "./gitHubUser";
 import { Repo } from "./repo";
 import { RepoState } from "./repoState";
 import { ReasonNotIgnored, ReviewRequest } from "./reviewRequest";
@@ -46,11 +45,8 @@ document
 
 document.getElementById("login-button").addEventListener("click", async () => {
   try {
-    const auth = await initiateGitHubAuth();
-    const octokit = new Octokit({ auth: auth.token });
-    const user = await octokit.users.getAuthenticated();
-    const gitHubUser = new GitHubUser(user.data.id);
-    await trySyncWithCredentials(gitHubUser);
+    await initiateGitHubAuth();
+    await trySyncWithCredentials();
     window.location.reload();
   } catch (error) {
     console.error("Authentication failed:", error);
@@ -760,14 +756,13 @@ async function checkAuthAndInitialize() {
 
     // Test if token is valid
     const octokit = new Octokit({ auth: token });
-    const user = await octokit.users.getAuthenticated();
+    await octokit.users.getAuthenticated();
 
     // Token is valid, hide login and show content
     document.getElementById("login-section").style.display = "none";
     document.getElementById("main").style.display = "block";
 
-    const gitHubUser = new GitHubUser(user.data.id);
-    await trySyncWithCredentials(gitHubUser);
+    await trySyncWithCredentials();
 
     // Initialize app state
     await updatePopupPage();
