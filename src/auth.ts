@@ -13,8 +13,8 @@ export async function initiateGitHubAuth(): Promise<{ token: string }> {
           type: "token",
           tokenType: "oauth",
           token: response.token,
-          expiresAt: new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString(),
-          refreshToken: "",
+          expiresAt: null,
+          refreshToken: null,
           clientType: "github-app",
           clientId: "Iv23liIGYvmR015csDAR",
           refreshTokenExpiresAt: null,
@@ -35,12 +35,5 @@ export async function storeAuthentication(
 export async function getStoredToken(): Promise<string | null> {
   const storedAuth = await chrome.storage.sync.get("auth");
   if (!storedAuth || !storedAuth.auth) return null;
-
-  // Check if token is expired (8 hour expiry)
-  const expiresAt = new Date(storedAuth.auth.expiresAt).getTime();
-  if (Date.now() > expiresAt) {
-    return null; // Token expired, user needs to re-authenticate
-  }
-
   return storedAuth.auth.token;
 }
