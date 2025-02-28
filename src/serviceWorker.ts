@@ -15,7 +15,7 @@ interface AuthResponse {
 chrome.runtime.onMessage.addListener(
   (message, _sender, sendResponse: (response: AuthResponse) => void) => {
     if (message.action === "authenticate") {
-      handleAuth(sendResponse);
+      waitUntil(handleAuth(sendResponse));
     }
     return true; // According to Copilot, ensure the service worker stays alive
   },
